@@ -7,6 +7,33 @@
 
 ---
 
+## 0.2.0 — 2026-08-19 — 模組一起保活＋讀檔殘局清理
+
+**歸因**：0.1.0 只保活控制器，實機結果是「電梯救回來了，但中間停了一下，模組跟著停、而且醒不了」。
+`SpaceElevatorModuleMachine.handleTickRecipe()` 每 10 tick 檢查 `getSpaceElevatorTier() >= 8`，
+而該值在 `controller.getRecipeLogic().isWorking()` 為假時是 0 → 模組立刻 `interruptRecipe()`
+→ 同樣 `unsubscribe()`，之後沒有東西叫得醒它。也就是說 0.1.0 治了病源、沒治連鎖傷害。
+
+**內容**
+
+- **開場清帳**（治本）：控制器第一次被追蹤時，若處於「狀態 WORKING、但 `lastOriginRecipe` 是 null」
+  ——只有剛讀檔才會出現的組合——就呼叫一次 `RecipeLogic.resetRecipeLogic()`，逼它立刻重搜配方。
+  `lastOriginRecipe` 補回來後進度回捲恢復，讀檔後約 400 tick 那次「配方跑完 → 停一下」根本不會發生，
+  模組自然不會被打斷。旗標：`-Dgtoelevatorfix.resetStaleRecipe=false`。
+- **模組保活**（安全網）：把 `SpaceElevatorModuleMachine`（含資料模組、巨型模組等子類）
+  一起納入保活。旗標：`-Dgtoelevatorfix.modules=false`。
+- 保活間隔預設 20 → **5** tick，縮短任何一次意外停頓的恢復窗口。
+
+**新的反射目標**（全部對整合包實跑的 gtceu `26.7.3` `javap` 核對過）
+
+`RecipeLogic.getStatus()`、`RecipeLogic.getLastOriginRecipe()`、`RecipeLogic.resetRecipeLogic()`、
+靜態欄位 `RecipeLogic.WORKING`，以及 `SpaceElevatorModuleMachine`。
+模組的 `getRecipeLogic()` 沿用同一支 `Method`——
+`SpaceElevatorModuleMachine → CustomParallelMultiblockMachine → ElectricMultiblockMachine
+→ WorkableElectricMultiblockMachine → WorkableMultiblockMachine`，宣告類別一致。
+
+---
+
 ## 0.1.0 — 2026-08-19 — 太空電梯保活
 
 **內容**

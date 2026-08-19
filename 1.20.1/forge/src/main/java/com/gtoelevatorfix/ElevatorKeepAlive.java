@@ -36,9 +36,23 @@ import java.util.Set;
  * 太空電梯沒有任何會變化的物品／流體輸入來發出「內容變更」通知把它叫醒，於是永久停擺，
  * 只能玩家手動關機再開機。（算力／能量瞬時不足觸發的 {@code interruptRecipe()} 也會直接退訂，同一種死法。）
  *
- * <p><b>怎麼治</b>：每 {@code gtoelevatorfix.period}（預設 20）tick 對每一台已知的太空電梯控制器呼叫
- * {@code getRecipeLogic().updateTickSubscription()}。那支方法本身就會處理所有情況——已訂閱時是 no-op、
- * 玩家關機（SUSPEND）或結構未成型時會正確退訂——所以這裡不做任何狀態判斷，也不碰配方內容。
+ * <p><b>連鎖傷害</b>：電梯只要停一下，模組的 {@code SpaceElevatorModuleMachine.handleTickRecipe()}
+ * 每 10 tick 檢查一次 {@code getSpaceElevatorTier() >= 8}，而該值在控制器沒在運轉時是 0 →
+ * 模組立刻 {@code interruptRecipe()} → 同樣退訂 tick。電梯自己活過來，模組卻醒不了。
+ *
+ * <p><b>怎麼治</b>（三件事，各有獨立旗標）：
+ * <ol>
+ *   <li><b>保活</b>：每 {@code gtoelevatorfix.period}（預設 5）tick 對每一台已知的太空電梯控制器
+ *       <b>與模組</b>呼叫 {@code getRecipeLogic().updateTickSubscription()}。那支方法自己會處理所有
+ *       情況——已訂閱時是 no-op、玩家關機（SUSPEND）或結構未成型時會正確退訂——所以這裡不做任何
+ *       狀態判斷，也不碰配方內容。</li>
+ *   <li><b>開場清帳</b>：控制器第一次被納入追蹤時，若它處於「WORKING 但 lastOriginRecipe 是 null」
+ *       這個<b>只有剛讀檔才會出現</b>的狀態，就呼叫一次 {@code resetRecipeLogic()} 逼它立刻重搜配方。
+ *       這樣 {@code lastOriginRecipe} 馬上補回來、回捲恢復，那次「配方跑完 → 停一下」根本不會發生
+ *       （否則會在讀檔後約 400 tick 才爆，模組必然跟著中斷）。</li>
+ *   <li><b>模組保活</b>：把 {@code SpaceElevatorModuleMachine}（含資料模組、巨型模組等子類）
+ *       一起納入第 1 點。</li>
+ * </ol>
  *
  * <p><b>為什麼是反射</b>：工作區既有紀錄顯示，往 {@code com.gtocore.*} 掛 mixin 有過兩次
  * 「進了 jar、config 正常載入、零錯誤零警告、但實際沒生效」的前例（真因未明），
@@ -48,18 +62,24 @@ public final class ElevatorKeepAlive {
 
     private static final Logger LOG = LogManager.getLogger("gtoelevatorfix");
 
-    /** GTOCore 的太空電梯控制器；{@code SuperSpaceElevatorMachine}（通天之路）是它的子類，一併涵蓋。 */
+    /** 太空電梯控制器；{@code SuperSpaceElevatorMachine}（通天之路）是它的子類，一併涵蓋。 */
     private static final String ELEVATOR_CLASS = "com.gtocore.common.machine.multiblock.electric.space.SpaceElevatorMachine";
+    /** 太空電梯模組；資料模組、巨型模組都是它的子類。 */
+    private static final String MODULE_CLASS = "com.gtocore.common.machine.multiblock.electric.space.SpaceElevatorModuleMachine";
     private static final String MACHINE_BE_CLASS = "com.gregtechceu.gtceu.api.blockentity.MetaMachineBlockEntity";
 
-    /** 單一行為單一開關（工作區慣例：不做「一鍵全開」總開關）。 */
+    /** 單一行為單一旗標（工作區慣例：不做「一鍵全開」總開關）。 */
     private static final boolean ENABLED = !"false".equalsIgnoreCase(System.getProperty("gtoelevatorfix.enabled"));
-    /** 保活間隔（tick）。調小沒有意義，唯一效果是把恢復延遲從 1 秒再縮短。 */
-    private static final int PERIOD = Math.max(1, Integer.getInteger("gtoelevatorfix.period", 20));
+    /** 模組是否一起保活。電梯停一下就會把模組打斷，所以預設開。 */
+    private static final boolean KEEP_MODULES = !"false".equalsIgnoreCase(System.getProperty("gtoelevatorfix.modules"));
+    /** 讀檔後是否清掉「WORKING 但沒有 lastOriginRecipe」的殘局。關掉就退回 0.1.0 的純保活。 */
+    private static final boolean RESET_STALE = !"false".equalsIgnoreCase(System.getProperty("gtoelevatorfix.resetStaleRecipe"));
+    /** 保活間隔（tick）。越小，被打斷後的恢復窗口越短。 */
+    private static final int PERIOD = Math.max(1, Integer.getInteger("gtoelevatorfix.period", 5));
     /** 區塊載入後延幾 tick 再掃一次；區塊剛載入時 BlockEntity 有可能還沒實體化。 */
     private static final int RESCAN_DELAY = 20;
 
-    /** 追蹤中的太空電梯控制器（identity set，機器物件不保證有值語意的 equals）。 */
+    /** 追蹤中的機器（identity set，機器物件不保證有值語意的 equals）。 */
     private static final Set<Object> TRACKED = Collections.newSetFromMap(new IdentityHashMap<>());
     /** 已經印過「喚醒」訊息的機器，避免同一台重複洗版。 */
     private static final Set<Object> REVIVE_LOGGED = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -73,10 +93,15 @@ public final class ElevatorKeepAlive {
 
     private static Class<?> machineBeClass;
     private static Class<?> elevatorClass;
+    private static Class<?> moduleClass;
     private static Field metaMachineField;
     private static Method isInValidMethod;
     private static Method getRecipeLogicMethod;
     private static Method updateTickSubscriptionMethod;
+    private static Method getStatusMethod;
+    private static Method getLastOriginRecipeMethod;
+    private static Method resetRecipeLogicMethod;
+    private static int statusWorking;
     /** 診斷用，缺了也不影響保活本身。 */
     private static Field subscriptionField;
     private static Field stillSubscribedField;
@@ -91,8 +116,8 @@ public final class ElevatorKeepAlive {
         MinecraftForge.EVENT_BUS.addListener(ElevatorKeepAlive::onChunkLoad);
         MinecraftForge.EVENT_BUS.addListener(ElevatorKeepAlive::onServerTick);
         MinecraftForge.EVENT_BUS.addListener(ElevatorKeepAlive::onServerStopped);
-        LOG.info("{} 已載入：每 {} tick 把太空電梯的 RecipeLogic 重新掛回 tick。停用用 -Dgtoelevatorfix.enabled=false。",
-                GtoElevatorFixMod.TAG, PERIOD);
+        LOG.info("{} 已載入：每 {} tick 保活太空電梯{}；讀檔殘局清理={}。停用用 -Dgtoelevatorfix.enabled=false。",
+                GtoElevatorFixMod.TAG, PERIOD, KEEP_MODULES ? "與模組" : "（不含模組）", RESET_STALE);
     }
 
     // ---------------------------------------------------------------- 事件
@@ -114,7 +139,7 @@ public final class ElevatorKeepAlive {
 
     private static void onServerStopped(ServerStoppedEvent event) {
         if (reviveCount > 0) {
-            LOG.info("{} 本場共喚醒睡死的太空電梯配方邏輯 {} 次。", GtoElevatorFixMod.TAG, reviveCount);
+            LOG.info("{} 本場共喚醒睡死的配方邏輯 {} 次。", GtoElevatorFixMod.TAG, reviveCount);
         }
         TRACKED.clear();
         REVIVE_LOGGED.clear();
@@ -142,17 +167,36 @@ public final class ElevatorKeepAlive {
             if (!machineBeClass.isInstance(blockEntity)) continue;
             try {
                 Object machine = metaMachineField.get(blockEntity);
-                if (!elevatorClass.isInstance(machine)) continue;
-                if (TRACKED.add(machine)) {
-                    LOG.info("{} 納入保活：{} @ {}（{}）", GtoElevatorFixMod.TAG,
-                            machine.getClass().getSimpleName(), blockEntity.getBlockPos(),
-                            level.dimension().location());
-                }
+                boolean elevator = elevatorClass.isInstance(machine);
+                boolean module = KEEP_MODULES && moduleClass.isInstance(machine);
+                if (!elevator && !module) continue;
+                if (!TRACKED.add(machine)) continue;
+
+                LOG.info("{} 納入保活：{} @ {}（{}）", GtoElevatorFixMod.TAG,
+                        machine.getClass().getSimpleName(), blockEntity.getBlockPos(),
+                        level.dimension().location());
+                if (elevator && RESET_STALE) clearStaleRecipe(machine);
             } catch (ReflectiveOperationException | RuntimeException e) {
                 fail("讀取 MetaMachineBlockEntity.metaMachine 失敗", e);
                 return;
             }
         }
+    }
+
+    /**
+     * 讀檔殘局清理：「狀態是 WORKING、卻沒有 lastOriginRecipe」只可能是剛從存檔還原
+     * （{@code lastOriginRecipe} 是瞬態欄位）。這種殘局撐到配方跑完就會停一下、順手打斷所有模組，
+     * 所以在這裡直接重置配方邏輯，逼它立刻重搜一次、把 {@code lastOriginRecipe} 補回來。
+     */
+    private static void clearStaleRecipe(Object machine) throws ReflectiveOperationException {
+        Object recipeLogic = getRecipeLogicMethod.invoke(machine);
+        if (recipeLogic == null) return;
+        if ((Integer) getStatusMethod.invoke(recipeLogic) != statusWorking) return;
+        if (getLastOriginRecipeMethod.invoke(recipeLogic) != null) return;
+        resetRecipeLogicMethod.invoke(recipeLogic);
+        LOG.info("{} 清掉讀檔殘局：{} 的配方是從存檔還原、沒有 lastOriginRecipe，已重置為立即重搜，"
+                + "避免它撐到配方跑完才停機並打斷模組。", GtoElevatorFixMod.TAG,
+                machine.getClass().getSimpleName());
     }
 
     // ---------------------------------------------------------------- 保活
@@ -192,8 +236,8 @@ public final class ElevatorKeepAlive {
     private static void onRevived(Object machine) {
         reviveCount++;
         if (REVIVE_LOGGED.add(machine)) {
-            LOG.info("{} 喚醒了一台睡死的太空電梯（{}）：配方邏輯原本已退訂 tick，" +
-                    "這正是「重進遊戲後算力歸零、要手動開關機器」的現場。", GtoElevatorFixMod.TAG,
+            LOG.info("{} 喚醒了一台睡死的機器（{}）：配方邏輯原本已退訂 tick，"
+                    + "這正是「算力歸零、要手動開關機器」的現場。", GtoElevatorFixMod.TAG,
                     machine.getClass().getSimpleName());
         } else {
             LOG.debug("{} 再次喚醒 {}（累計 {} 次）。", GtoElevatorFixMod.TAG,
@@ -210,14 +254,20 @@ public final class ElevatorKeepAlive {
             ClassLoader loader = ElevatorKeepAlive.class.getClassLoader();
             machineBeClass = Class.forName(MACHINE_BE_CLASS, false, loader);
             elevatorClass = Class.forName(ELEVATOR_CLASS, false, loader);
+            moduleClass = Class.forName(MODULE_CLASS, false, loader);
 
             metaMachineField = machineBeClass.getField("metaMachine");
             Class<?> metaMachineClass = metaMachineField.getType();
             isInValidMethod = metaMachineClass.getMethod("isInValid");
+            // 宣告類別是 WorkableMultiblockMachine，控制器與模組都繼承它，同一支 Method 兩邊都能 invoke。
             getRecipeLogicMethod = elevatorClass.getMethod("getRecipeLogic");
 
             Class<?> recipeLogicClass = getRecipeLogicMethod.getReturnType();
             updateTickSubscriptionMethod = recipeLogicClass.getMethod("updateTickSubscription");
+            getStatusMethod = recipeLogicClass.getMethod("getStatus");
+            getLastOriginRecipeMethod = recipeLogicClass.getMethod("getLastOriginRecipe");
+            resetRecipeLogicMethod = recipeLogicClass.getMethod("resetRecipeLogic");
+            statusWorking = recipeLogicClass.getField("WORKING").getInt(null);
 
             // 以下兩個只用來判斷「原本是不是睡著」，拿不到就放棄診斷、不影響保活。
             try {

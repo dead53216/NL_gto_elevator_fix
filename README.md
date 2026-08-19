@@ -1,6 +1,7 @@
 # NL_gto_elevator_fix
 
-GregTech-Odyssey 專用小修補：**太空電梯重進遊戲後停機、算力占用歸零，必須手動開關機器才恢復**。
+GregTech-Odyssey 專用小修補：**太空電梯重進遊戲後停機、算力占用歸零，必須手動開關機器才恢復**，
+連同**被電梯停頓打斷、之後醒不過來的太空電梯模組**。
 
 - 平台：`1.20.1/forge`（GTO 整合包專用，不抽 common）
 - modid `gto_elevator_fix`、package `com.gtoelevatorfix`、log 前綴 `[elevatorfix]`
@@ -12,6 +13,7 @@ GregTech-Odyssey 專用小修補：**太空電梯重進遊戲後停機、算力�
 
 - 運算中心／算力監視器上原本被太空電梯占用的算力歸零；
 - 太空電梯與底下所有模組（組裝／資源採集／工程數據）全部停擺；
+- 電梯就算恢復了（例如被本 mod 救回），**模組也不會跟著醒**；
 - 放著多久都不會自己好；
 - 把太空電梯**手動關機再開機**就立刻恢復，之後只要不重進遊戲就一直正常。
 
@@ -38,15 +40,30 @@ GregTech-Odyssey 專用小修補：**太空電梯重進遊戲後停機、算力�
 守衛條件是上游 `0.5.6-pre2`（commit `0cae8fcd`）加進去的；整合包 `0.5.6-beta` 出貨的 jar 內
 `onWorking()` 位元組碼確實有那個 `getLastOriginRecipe` 的 `ifnull`（`javap -c` 可重驗）。
 
+### 連鎖傷害：模組
+
+電梯只要停一下，模組就會被一起打死。`SpaceElevatorModuleMachine.handleTickRecipe()` 每 10 tick 檢查一次
+`getSpaceElevatorTier() >= 8`，而 `getSpaceElevatorTier()` 只在
+`controller.getRecipeLogic().isWorking()` 為真時才回傳電梯等級，否則是 0 →
+模組立刻 `interruptRecipe()` → 同樣 `unsubscribe()`。模組也沒有東西能叫醒它，
+所以會出現「電梯自己活過來了，模組卻永遠停著」。
+
 ## 這個 mod 做什麼
 
-每 20 tick，對每一台已知的太空電梯控制器呼叫一次
-`getRecipeLogic().updateTickSubscription()`。
+三件事，各有獨立旗標：
 
-- 那支方法自己會處理所有情況：已訂閱時是 no-op；玩家關機（SUSPEND）或結構未成型時會正確退訂。
-  所以這裡**不做任何狀態判斷**，也不碰配方內容、產量、數值。
-- 恢復延遲最多 1 秒。
-- `SuperSpaceElevatorMachine`（通天之路）是 `SpaceElevatorMachine` 的子類，一併涵蓋。
+1. **保活**：每 5 tick 對每一台已知的太空電梯控制器**與模組**呼叫一次
+   `getRecipeLogic().updateTickSubscription()`。
+   那支方法自己會處理所有情況：已訂閱時是 no-op；玩家關機（SUSPEND）或結構未成型時會正確退訂。
+   所以這裡**不做任何狀態判斷**，也不碰配方內容、產量、數值。
+2. **開場清帳**：控制器第一次被納入追蹤時，若它是「狀態 WORKING、但 `lastOriginRecipe` 是 null」
+   ——這個組合**只有剛從存檔還原才會出現**——就呼叫一次 `resetRecipeLogic()` 逼它立刻重搜配方。
+   `lastOriginRecipe` 馬上補回來、進度回捲恢復，於是「配方跑完 → 停一下 → 打斷所有模組」
+   這件事根本不會發生（否則會在讀檔後約 400 tick 才爆）。
+3. **模組保活**：`SpaceElevatorModuleMachine`（含資料模組、巨型模組等子類）一起納入第 1 點，
+   當作第 2 點漏掉時的安全網。
+
+`SuperSpaceElevatorMachine`（通天之路）是 `SpaceElevatorMachine` 的子類，一併涵蓋。
 
 ### 怎麼找到太空電梯
 
@@ -68,16 +85,20 @@ GregTech-Odyssey 專用小修補：**太空電梯重進遊戲後停機、算力�
 | 系統屬性 | 預設 | 說明 |
 |---|---|---|
 | `-Dgtoelevatorfix.enabled=false` | 啟用 | 整個關掉 |
-| `-Dgtoelevatorfix.period=<tick>` | `20` | 保活間隔 |
+| `-Dgtoelevatorfix.period=<tick>` | `5` | 保活間隔 |
+| `-Dgtoelevatorfix.modules=false` | 啟用 | 只保活控制器，不管模組 |
+| `-Dgtoelevatorfix.resetStaleRecipe=false` | 啟用 | 不做開場清帳（退回 0.1.0 的純保活） |
 
 ## 怎麼確認有生效
 
 看 `logs/latest.log` 抓 `[elevatorfix]`：
 
-- 載入時：`[elevatorfix] 已載入：每 20 tick …`
-- 找到電梯：`[elevatorfix] 納入保活：SpaceElevatorMachine @ BlockPos{...}（minecraft:overworld）`
-- **真的救到時**：`[elevatorfix] 喚醒了一台睡死的太空電梯…` ← 這行出現，就等於實機證實了上面那條成因鏈
-- 關服時：`[elevatorfix] 本場共喚醒睡死的太空電梯配方邏輯 N 次。`
+- 載入時：`[elevatorfix] 已載入：每 5 tick 保活太空電梯與模組；讀檔殘局清理=true`
+- 找到電梯／模組：`[elevatorfix] 納入保活：SpaceElevatorMachine @ BlockPos{...}（minecraft:overworld）`
+- **讀檔清帳**：`[elevatorfix] 清掉讀檔殘局：… 已重置為立即重搜…` ← 這行出現，代表那台電梯確實帶著
+  「WORKING 但沒有 lastOriginRecipe」的殘局進遊戲，也就是實機證實了成因鏈
+- **真的救到時**：`[elevatorfix] 喚醒了一台睡死的機器…`
+- 關服時：`[elevatorfix] 本場共喚醒睡死的配方邏輯 N 次。`
 
 若整合包改了 API 導致反射失敗，會印一行 `ERROR` 並**整場停用保活**，不會每 tick 噴例外。
 

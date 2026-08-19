@@ -7,9 +7,10 @@ modId="gto_elevator_fix"
 version="${mod_version}"
 displayName="GTO Space Elevator Keep-Alive"
 description='''
-修復 GregTech-Odyssey 太空電梯「重進遊戲後停機、算力占用歸零，必須手動開關機器才恢復」。
-定期把太空電梯控制器的 RecipeLogic 重新掛回伺服器 tick，讓它自己重試配方；不改任何配方、產量或數值。
-純反射實作，不掛任何 mixin。關閉：-Dgtoelevatorfix.enabled=false
+修復 GregTech-Odyssey 太空電梯「重進遊戲後停機、算力占用歸零，必須手動開關機器才恢復」，
+連同被電梯停頓打斷、之後醒不過來的太空電梯模組。做法是定期把控制器與模組的 RecipeLogic
+重新掛回伺服器 tick，並在讀檔時清掉「WORKING 但沒有 lastOriginRecipe」的殘局；
+不改任何配方、產量或數值。純反射實作，不掛任何 mixin。關閉：-Dgtoelevatorfix.enabled=false
 '''
 
 [[dependencies.gto_elevator_fix]]
