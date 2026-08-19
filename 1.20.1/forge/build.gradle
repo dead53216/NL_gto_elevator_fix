@@ -1,0 +1,43 @@
+plugins {
+    id 'java'
+    id 'net.neoforged.moddev.legacyforge' version '2.0.141'
+}
+
+// 版本唯一來源：mod 根目錄 VERSION（CRLF，build-jar.bat 以 set /p 讀同一份）
+def modVersion = { def vls = file('../../VERSION').readLines('UTF-8')*.trim(); def cv = vls.find { it.startsWith('CURRENT_VERSION=') }; cv ? cv.substring(16).trim() : vls.find { it && !it.contains('=') } }()
+version = modVersion
+group = 'com.gtoelevatorfix'
+base { archivesName = 'gto_elevator_fix' }
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+repositories {
+    mavenCentral()
+    maven { url = "https://maven.neoforged.net/releases" }
+}
+
+legacyForge {
+    version = "1.20.1-47.1.47"
+
+    mods {
+        gto_elevator_fix {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    inputs.property 'mod_version', modVersion
+    filesMatching(['META-INF/mods.toml']) {
+        expand mod_version: modVersion
+    }
+}
+
+// 刻意零 mod 依賴：GTOCore／GTCEU 一律走反射（見 README「為什麼不用 mixin」），
+// 所以 build 只需要 Forge 本身，也不會被整合包的版本漂移綁死。
+dependencies {
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}

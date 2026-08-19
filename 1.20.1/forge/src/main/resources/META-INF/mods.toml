@@ -1,0 +1,41 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="MIT"
+
+[[mods]]
+modId="gto_elevator_fix"
+version="${mod_version}"
+displayName="GTO Space Elevator Keep-Alive"
+description='''
+修復 GregTech-Odyssey 太空電梯「重進遊戲後停機、算力占用歸零，必須手動開關機器才恢復」。
+定期把太空電梯控制器的 RecipeLogic 重新掛回伺服器 tick，讓它自己重試配方；不改任何配方、產量或數值。
+純反射實作，不掛任何 mixin。關閉：-Dgtoelevatorfix.enabled=false
+'''
+
+[[dependencies.gto_elevator_fix]]
+    modId="forge"
+    mandatory=true
+    versionRange="[47,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.gto_elevator_fix]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="[1.20.1,1.21)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.gto_elevator_fix]]
+    modId="gtceu"
+    mandatory=true
+    versionRange="*"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.gto_elevator_fix]]
+    modId="gtocore"
+    mandatory=true
+    versionRange="*"
+    ordering="AFTER"
+    side="BOTH"
